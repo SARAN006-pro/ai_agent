@@ -34,14 +34,14 @@ _API_LOG = AgentLogger("API")
 def _cors_origins_from_env() -> tuple[list[str], bool]:
     raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
     if not raw:
-        return ["*"], True
+        return ["*"], False
 
     if raw == "*":
-        return ["*"], True
+        return ["*"], False
 
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     if not origins:
-        return ["*"], True
+        return ["*"], False
     return origins, True
 
 
@@ -252,11 +252,11 @@ async def chat_stream(payload: ChatRequest):
 
 
 @app.post("/analyze-image", response_model=AnalyzeImageResponse)
-async def analyze_image(image: UploadFile = File(...)):
+async def analyze_image(file: UploadFile = File(...)):
     started_at = time.perf_counter()
     try:
         _ensure_runtime()
-        result = await _run_image_pipeline(image)
+        result = await _run_image_pipeline(file)
         elapsed_ms = (time.perf_counter() - started_at) * 1000
         _API_LOG.info(f"/analyze-image latency_ms={elapsed_ms:.2f}")
         return result
@@ -264,4 +264,4 @@ async def analyze_image(image: UploadFile = File(...)):
         raise
     except Exception as e:
         _API_LOG.error(f"/analyze-image failed: {e}")
-        raise HTTPException(status_code=500, detail="Image analysis failed")
+        raise HTTPException(status_code=500, detail=f"Image analysis failed: {e}")

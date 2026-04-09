@@ -128,7 +128,7 @@ Recommended settings:
 - Output: default Next.js output
 
 Set frontend env var in Vercel:
-- `NEXT_PUBLIC_API_BASE_URL=https://your-backend.onrender.com`
+- `NEXT_PUBLIC_API_URL=https://your-backend.onrender.com`
 
 The frontend now reads this env var for:
 - `/chat`
@@ -140,7 +140,7 @@ The frontend now reads this env var for:
 Copy `frontend/.env.example` to `frontend/.env.local` and set:
 
 ```env
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 ```
 
 ### 4. Push and redeploy

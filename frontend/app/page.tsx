@@ -74,9 +74,10 @@ function createMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_URL || "https://ai-agent-595t.onrender.com"
-).replace(/\/$/, "");
+const rawApiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "https://ai-agent-595t.onrender.com";
+const API_BASE_URL = rawApiBaseUrl
+  .replace(/^http:\/\/(.*\.onrender\.com)(\/.*)?$/i, "https://$1$2")
+  .replace(/\/$/, "");
 
 function apiUrl(path: string): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;
@@ -697,6 +698,11 @@ function MessageBubble({
   };
 
   if (isError) {
+    const errorText =
+      !message.content || message.content === "connection_error"
+        ? "Something went wrong. Please try again."
+        : message.content;
+
     return (
       <motion.div
         initial={{ opacity: 0, y: 8 }}
@@ -708,12 +714,8 @@ function MessageBubble({
           <AlertTriangle className="w-4 h-4 text-destructive" />
         </div>
         <div className="max-w-[80%] sm:max-w-[70%] bg-destructive/10 border border-destructive/25 rounded-2xl rounded-bl-sm px-4 py-3.5 space-y-2.5">
-          <p className="text-sm font-semibold text-destructive">⚠️ Connection Issue</p>
-          <div className="text-sm text-foreground/70 space-y-1">
-            <p>• Unable to connect to backend</p>
-            <p>• Check your FastAPI server at <code className="bg-secondary px-1 py-0.5 rounded text-[11px] font-mono">{API_BASE_URL}</code></p>
-            <p>• Make sure CORS is enabled</p>
-          </div>
+          <p className="text-sm font-semibold text-destructive">Something Went Wrong</p>
+          <p className="text-sm text-foreground/80">{errorText}</p>
           {onRetry && message.retryPayload && (
             <button
               onClick={() => onRetry(message.retryPayload!)}
@@ -1275,8 +1277,9 @@ export default function Page() {
 
   const sendMessage = useCallback(
     async (text: string) => {
+      const trimmedInput = (text || "").trim();
       // SINGLE SOURCE OF TRUTH: Block if already loading
-      if (!text.trim() || isLoading) return;
+      if (!trimmedInput || isLoading) return;
 
       if (!hasChatStarted) setHasChatStarted(true);
 
@@ -1284,7 +1287,7 @@ export default function Page() {
       const userMsg: Message = {
         id: createMessageId(),
         role: "user",
-        content: text,
+        content: trimmedInput,
         timestamp: new Date(),
         loading: false,
         responseComplete: true,
@@ -1292,7 +1295,7 @@ export default function Page() {
       appendUniqueMessage(userMsg);
       setInputValue("");
 
-      const normalizedQuery = normalizeQuery(text);
+      const normalizedQuery = normalizeQuery(trimmedInput);
       const previousNormalized = lastQueryRef.current;
       const similarityScore = previousNormalized ? querySimilarity(normalizedQuery, previousNormalized) : 0;
       const isRepeatQuery = Boolean(
@@ -1305,7 +1308,7 @@ export default function Page() {
           ? responseCacheRef.current.get(previousNormalized)
           : undefined;
 
-      console.log("QUERY:", text);
+      console.log("QUERY:", trimmedInput);
       console.log("IS REPEAT:", isRepeatQuery);
       console.log("CACHE HIT:", Boolean(exactCache || similarCache));
 
@@ -1331,7 +1334,7 @@ export default function Page() {
       lastQueryRef.current = normalizedQuery;
 
       // Intent detection — no backend call needed
-      const intent = detectIntent(text);
+      const intent = detectIntent(trimmedInput);
       if (intent.matched) {
         const assistantMsg: Message = {
           id: createMessageId(),
@@ -1362,136 +1365,39 @@ export default function Page() {
       });
 
       try {
-        const res = await fetch(apiUrl("/chat/stream"), {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || API_BASE_URL}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text }),
+          body: JSON.stringify({
+            message: trimmedInput,
+          }),
         });
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const reader = res.body?.getReader();
-        if (!reader) throw new Error("Streaming body unavailable");
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let accumulated = "";
-        let gotChunk = false;
-        let streamComplete = false;
-        let responseComplete = false;
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const events = buffer.split("\n\n");
-          buffer = events.pop() ?? "";
-
-          for (const eventBlock of events) {
-            const dataLine = eventBlock
-              .split("\n")
-              .find((line) => line.startsWith("data:"));
-            if (!dataLine) continue;
-
-            const raw = dataLine.slice(5).trim();
-            try {
-              const payload = JSON.parse(raw) as {
-                type?: string;
-                content?: string;
-                response_complete?: boolean;
-              };
-              if (payload.type === "chunk" && payload.content) {
-                gotChunk = true;
-                accumulated += payload.content;
-                // Keep loading until stream completion is confirmed.
-                updateMessage(assistantId, {
-                  content: accumulated,
-                  loading: true,
-                  responseComplete: false,
-                });
-              }
-              if (payload.type === "done") {
-                streamComplete = true;
-                responseComplete = payload.response_complete !== false;
-              }
-            } catch {
-              // Ignore malformed SSE chunks and continue.
-            }
-          }
+        if (!res.ok) {
+          const errorText = await res.text();
+          throw new Error(`HTTP ${res.status}: ${errorText}`);
         }
+        const data = await res.json();
+        const finalContent = String(
+          data?.response ?? "I received your message but couldn't generate a response."
+        );
 
-        // Handle trailing event block without a terminal separator.
-        if (buffer.trim().startsWith("data:")) {
-          try {
-            const raw = buffer.trim().slice(5).trim();
-            const payload = JSON.parse(raw) as {
-              type?: string;
-              response_complete?: boolean;
-            };
-            if (payload.type === "done") {
-              streamComplete = true;
-              responseComplete = payload.response_complete !== false;
-            }
-          } catch {
-            // Ignore malformed trailing event.
-          }
-        }
-
-        if (!gotChunk) {
-          const fallbackRes = await fetch(apiUrl("/chat"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: text }),
-          });
-
-          if (!fallbackRes.ok) throw new Error(`HTTP ${fallbackRes.status}`);
-          const fallbackData = await fallbackRes.json();
-          const finalContent = String(
-            fallbackData.response ?? "I received your message but couldn't generate a response."
-          );
-          updateMessage(assistantId, {
-            content: finalContent,
-            loading: false,
-            responseComplete: true,
-          });
-          responseCacheRef.current.set(normalizedQuery, finalContent);
-        } else if (!streamComplete || !responseComplete) {
-          const continueRes = await fetch(apiUrl("/chat"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              message: `Continue this response properly from where it stopped. Do not repeat text.\n\n${accumulated}`,
-            }),
-          });
-
-          if (!continueRes.ok) throw new Error(`HTTP ${continueRes.status}`);
-          const continueData = await continueRes.json();
-          const continuation = String(continueData.response ?? "").trim();
-          const merged = continuation ? `${accumulated}\n${continuation}` : accumulated;
-
-          updateMessage(assistantId, {
-            content: merged,
-            loading: false,
-            responseComplete: true,
-          });
-          responseCacheRef.current.set(normalizedQuery, merged);
-        } else {
-          updateMessage(assistantId, {
-            content: accumulated,
-            loading: false,
-            responseComplete: true,
-          });
-          responseCacheRef.current.set(normalizedQuery, accumulated);
-        }
-      } catch {
+        updateMessage(assistantId, {
+          content: finalContent,
+          loading: false,
+          responseComplete: true,
+        });
+        responseCacheRef.current.set(normalizedQuery, finalContent);
+      } catch (err) {
+        console.error("API Error:", err);
         // UPDATE the same message with error state (do NOT add new one)
         updateMessage(assistantId, {
           role: "error",
-          content: "connection_error",
+          content: "Request failed. Try again.",
           loading: false,
           responseComplete: true,
           isRetryable: true,
-          retryPayload: text,
+          retryPayload: trimmedInput,
         });
       } finally {
         // Unblock the UI
@@ -1614,7 +1520,7 @@ export default function Page() {
 
     try {
       const formData = new FormData();
-      formData.append("image", imageFile);
+      formData.append("file", imageFile);
 
       const res = await fetch(apiUrl("/analyze-image"), {
         method: "POST",
@@ -1622,8 +1528,9 @@ export default function Page() {
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData?.detail || `HTTP ${res.status}`);
+        const errorText = await res.text();
+        console.error("Image API non-200:", res.status, errorText);
+        throw new Error(`HTTP ${res.status}: ${errorText}`);
       }
 
       const data = (await res.json()) as ImageAnalyzeResponse;
@@ -1640,11 +1547,12 @@ export default function Page() {
         setHasChatStarted(true);
       }
     } catch (err) {
+      console.error("Image API Error:", err);
       const message = err instanceof Error ? err.message : "Image analysis failed";
       setImageError(message);
       updateMessage(analysisMsgId, {
         role: "error",
-        content: "connection_error",
+        content: "Unable to analyze image right now. Please try again later.",
         loading: false,
         responseComplete: true,
         isRetryable: false,
