@@ -74,7 +74,9 @@ function createMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL || "https://ai-agent-595t.onrender.com"
+).replace(/\/$/, "");
 
 function apiUrl(path: string): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;

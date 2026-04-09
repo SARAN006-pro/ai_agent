@@ -34,15 +34,14 @@ _API_LOG = AgentLogger("API")
 def _cors_origins_from_env() -> tuple[list[str], bool]:
     raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
     if not raw:
-        return ["*"], False
+        return ["*"], True
 
     if raw == "*":
-        # Browsers disallow allow_credentials=True with wildcard origin.
-        return ["*"], False
+        return ["*"], True
 
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     if not origins:
-        return ["*"], False
+        return ["*"], True
     return origins, True
 
 
