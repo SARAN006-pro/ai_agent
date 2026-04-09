@@ -699,7 +699,7 @@ function MessageBubble({
 
   if (isError) {
     const errorText =
-      !message.content || message.content === "connection_error"
+      !message.content
         ? "Something went wrong. Please try again."
         : message.content;
 
@@ -1239,6 +1239,7 @@ function ImageAnalyzerCard({
 export default function Page() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
+  const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [hasChatStarted, setHasChatStarted] = useState(false);
   const [imagePreview, setImagePreview] = useState("");
@@ -1250,9 +1251,6 @@ export default function Page() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const lastQueryRef = useRef<string | null>(null);
-  const responseCacheRef = useRef<Map<string, string>>(new Map());
-
   const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
@@ -1275,136 +1273,92 @@ export default function Page() {
     });
   }, []);
 
-  const sendMessage = useCallback(
-    async (text: string) => {
-      const trimmedInput = (text || "").trim();
-      // SINGLE SOURCE OF TRUTH: Block if already loading
-      if (!trimmedInput || isLoading) return;
+  const handleSend = useCallback(
+    async (overrideInput?: string) => {
+      const input = typeof overrideInput === "string" ? overrideInput : inputValue;
+      let assistantId = "";
 
-      if (!hasChatStarted) setHasChatStarted(true);
+      try {
+        if (!input || !input.trim() || isLoading) {
+          console.log("Empty input");
+          return;
+        }
 
-      // Add user message
-      const userMsg: Message = {
-        id: createMessageId(),
-        role: "user",
-        content: trimmedInput,
-        timestamp: new Date(),
-        loading: false,
-        responseComplete: true,
-      };
-      appendUniqueMessage(userMsg);
-      setInputValue("");
+        if (!hasChatStarted) setHasChatStarted(true);
+        setError("");
 
-      const normalizedQuery = normalizeQuery(trimmedInput);
-      const previousNormalized = lastQueryRef.current;
-      const similarityScore = previousNormalized ? querySimilarity(normalizedQuery, previousNormalized) : 0;
-      const isRepeatQuery = Boolean(
-        previousNormalized && (normalizedQuery === previousNormalized || similarityScore >= 0.8)
-      );
-
-      const exactCache = responseCacheRef.current.get(normalizedQuery);
-      const similarCache =
-        !exactCache && isRepeatQuery && previousNormalized
-          ? responseCacheRef.current.get(previousNormalized)
-          : undefined;
-
-      console.log("QUERY:", trimmedInput);
-      console.log("IS REPEAT:", isRepeatQuery);
-      console.log("CACHE HIT:", Boolean(exactCache || similarCache));
-
-      if (exactCache || similarCache) {
-        const base = exactCache || similarCache || "";
-        const refined =
-          "You've already asked this. Here's a refined summary.\n\n" +
-          base +
-          "\n\nNew angle: Compare trade-offs across sources and focus on one concrete next step you can execute now.";
+        const trimmedInput = input.trim();
 
         appendUniqueMessage({
           id: createMessageId(),
-          role: "assistant",
-          content: refined,
+          role: "user",
+          content: trimmedInput,
           timestamp: new Date(),
           loading: false,
           responseComplete: true,
         });
-        lastQueryRef.current = normalizedQuery;
-        return;
-      }
+        setInputValue("");
 
-      lastQueryRef.current = normalizedQuery;
-
-      // Intent detection — no backend call needed
-      const intent = detectIntent(trimmedInput);
-      if (intent.matched) {
-        const assistantMsg: Message = {
-          id: createMessageId(),
+        setIsLoading(true);
+        assistantId = createMessageId();
+        appendUniqueMessage({
+          id: assistantId,
           role: "assistant",
-          content: intent.response,
+          content: "",
           timestamp: new Date(),
-          loading: false,
-          responseComplete: true,
-        };
-        await new Promise((r) => setTimeout(r, 420)); // subtle delay for realism
-        appendUniqueMessage(assistantMsg);
-        responseCacheRef.current.set(normalizedQuery, intent.response);
-        return;
-      }
+          loading: true,
+          responseComplete: false,
+        });
 
-      // Backend call — set isLoading ONCE and maintain single placeholder
-      setIsLoading(true);
-      const assistantId = createMessageId();
-
-      // Create ONE loading placeholder
-      appendUniqueMessage({
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        timestamp: new Date(),
-        loading: true,
-        responseComplete: false,
-      });
-
-      try {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || API_BASE_URL}/chat`, {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/chat`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify({
-            message: trimmedInput,
+            message: input.trim(),
           }),
         });
 
+        console.log("Status:", res.status);
+
         if (!res.ok) {
-          const errorText = await res.text();
-          throw new Error(`HTTP ${res.status}: ${errorText}`);
+          const errText = await res.text();
+          console.error("Backend error:", errText);
+          throw new Error(`HTTP ${res.status}`);
         }
+
         const data = await res.json();
+        console.log("Response:", data);
+
         const finalContent = String(
           data?.response ?? "I received your message but couldn't generate a response."
         );
-
         updateMessage(assistantId, {
           content: finalContent,
           loading: false,
           responseComplete: true,
         });
-        responseCacheRef.current.set(normalizedQuery, finalContent);
       } catch (err) {
-        console.error("API Error:", err);
-        // UPDATE the same message with error state (do NOT add new one)
-        updateMessage(assistantId, {
-          role: "error",
-          content: "Request failed. Try again.",
-          loading: false,
-          responseComplete: true,
-          isRetryable: true,
-          retryPayload: trimmedInput,
-        });
+        console.error("FINAL ERROR:", err);
+        setError((err as Error).message);
+
+        const fallbackInput = typeof overrideInput === "string" ? overrideInput : inputValue;
+        if (assistantId) {
+          updateMessage(assistantId, {
+            role: "error",
+            content: (err as Error).message,
+            loading: false,
+            responseComplete: true,
+            isRetryable: true,
+            retryPayload: fallbackInput,
+          });
+        }
       } finally {
-        // Unblock the UI
         setIsLoading(false);
       }
     },
-    [isLoading, hasChatStarted, appendUniqueMessage, updateMessage]
+    [appendUniqueMessage, hasChatStarted, inputValue, isLoading, updateMessage]
   );
 
   const handleSuggest = useCallback(
@@ -1415,11 +1369,11 @@ export default function Page() {
         imageInputRef.current?.click();
         return;
       }
-      sendMessage(suggestion);
+      void handleSend(suggestion);
       // Scroll input into view on mobile
       setTimeout(() => inputAreaRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }), 100);
     },
-    [sendMessage]
+    [handleSend]
   );
 
   const handleImagePick = useCallback((file: File | null) => {
@@ -1450,7 +1404,7 @@ export default function Page() {
         return;
       }
       if (action === "web_research") {
-        void sendMessage("Search latest AI news and summarize the key updates");
+        void handleSend("Search latest AI news and summarize the key updates");
         return;
       }
       if (action === "ask_question") {
@@ -1461,7 +1415,7 @@ export default function Page() {
       setInputValue("Summarize this content: ");
       inputAreaRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     },
-    [sendMessage]
+    [handleSend]
   );
 
   const handleUploadImage = useCallback(() => {
@@ -1571,8 +1525,7 @@ export default function Page() {
     setImagePreview("");
     setImageFile(null);
     setIsImageModalOpen(false);
-    responseCacheRef.current.clear();
-    lastQueryRef.current = null;
+    setError("");
   };
 
   return (
@@ -1603,7 +1556,7 @@ export default function Page() {
                 transition={{ duration: 0.3 }}
               >
                 <ChatHeader messageCount={messages.length} onClear={handleClear} />
-                <ChatBox messages={messages} onRetry={sendMessage} />
+                <ChatBox messages={messages} onRetry={(payload) => void handleSend(payload)} />
               </motion.div>
             )}
           </AnimatePresence>
@@ -1613,13 +1566,16 @@ export default function Page() {
             <InputBar
               value={inputValue}
               onChange={setInputValue}
-              onSend={() => sendMessage(inputValue)}
+              onSend={() => void handleSend()}
               disabled={isLoading}
               onUploadImage={handleUploadImage}
               onTakePhoto={handleTakePhoto}
               onUploadFile={handleUploadFile}
               onConnectDrive={handleConnectDrive}
             />
+            {error && (
+              <p className="mt-2 text-center text-xs text-destructive">{error}</p>
+            )}
             <input
               ref={imageInputRef}
               type="file"
